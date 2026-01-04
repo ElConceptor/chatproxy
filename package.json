@@ -1,29 +1,12 @@
 {
   "name": "chatproxy",
   "version": "1.0.0",
-  "description": "Proxy pour Qualtrics vers ChatGPT API",
-  "main": "server.js",
+  "description": "Proxy serverless Qualtrics → ChatGPT",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "vercel-build": "echo 'No build required'"
   },
-  "keywords": [
-    "proxy",
-    "qualtrics",
-    "chatgpt",
-    "cors"
-  ],
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "axios": "^1.6.2"
-  },
-  "devDependencies": {
-    "@vercel/node": "^3.0.7"
+  "engines": {
+    "node": ">=18.x"
   }
 }
-

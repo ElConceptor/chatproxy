@@ -1,48 +1,105 @@
-import axios from 'axios';
+/**
+ * Proxy serverless Qualtrics → ChatGPT
+ * Capture les appels et les envoie à OpenAI
+ */
 
-// Configuration de l'API OpenAI
 const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Fonction helper pour gérer CORS
-function setCorsHeaders(res) {
-  const origin = process.env.ALLOWED_ORIGIN || '*';
-  res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
+// Configuration
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-3.5-turbo';
+const DEFAULT_TEMPERATURE = parseFloat(process.env.OPENAI_TEMPERATURE || '0.7');
+const DEFAULT_MAX_TOKENS = parseInt(process.env.OPENAI_MAX_TOKENS || '500');
+const TIMEOUT_MS = 25000;
+
+/**
+ * Appel à l'API OpenAI
+ */
+async function callOpenAI(messages, model, temperature, maxTokens) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    const response = await fetch(OPENAI_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens
+      }),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw {
+        status: response.status,
+        message: errorData.error?.message || `OpenAI API error: ${response.statusText}`
+      };
+    }
+
+    return await response.json();
+  } catch (error) {
+    clearTimeout(timeoutId);
+    
+    if (error.name === 'AbortError') {
+      throw { status: 504, message: 'Timeout: La requête a pris trop de temps' };
+    }
+    
+    throw error;
+  }
 }
 
-// Gérer les requêtes OPTIONS (preflight)
-function handleOptions(res) {
-  setCorsHeaders(res);
-  res.status(200).end();
-}
+/**
+ * Construire les messages pour OpenAI
+ */
+function buildMessages(message, conversationHistory, systemPrompt) {
+  const messages = [];
 
-export default async function handler(req, res) {
-  // Gérer les requêtes OPTIONS pour CORS
-  if (req.method === 'OPTIONS') {
-    return handleOptions(res);
+  if (systemPrompt) {
+    messages.push({ role: 'system', content: systemPrompt });
   }
 
-  setCorsHeaders(res);
+  if (conversationHistory && Array.isArray(conversationHistory)) {
+    messages.push(...conversationHistory);
+  }
 
-  // Gérer les requêtes GET
+  messages.push({ role: 'user', content: message });
+
+  return messages;
+}
+
+/**
+ * Handler serverless Vercel
+ */
+export default async function handler(req, res) {
+  // OPTIONS (preflight CORS)
+  if (req.method === 'OPTIONS') {
+    return res.status(200).json({}).end();
+  }
+
+  // GET (health check)
   if (req.method === 'GET') {
-    return res.json({
+    return res.status(200).json({
       status: 'ok',
-      message: 'Service de chat disponible',
       hasApiKey: !!OPENAI_API_KEY
     });
   }
 
-  // Gérer les requêtes POST
+  // POST (chat)
   if (req.method === 'POST') {
     try {
       const { message, conversationHistory, systemPrompt } = req.body;
 
-      // Validation de la requête
-      if (!message) {
+      // Validation
+      if (!message || typeof message !== 'string' || message.trim().length === 0) {
         return res.status(400).json({
           error: 'Le champ "message" est requis'
         });
@@ -50,52 +107,23 @@ export default async function handler(req, res) {
 
       if (!OPENAI_API_KEY) {
         return res.status(500).json({
-          error: 'Configuration du serveur incomplète: OPENAI_API_KEY manquante'
+          error: 'OPENAI_API_KEY manquante'
         });
       }
 
-      // Construction des messages pour l'API OpenAI
-      const messages = [];
+      // Construire les messages
+      const messages = buildMessages(message, conversationHistory, systemPrompt);
 
-      // Ajouter le prompt système si fourni
-      if (systemPrompt) {
-        messages.push({
-          role: 'system',
-          content: systemPrompt
-        });
-      }
-
-      // Ajouter l'historique de conversation si fourni
-      if (conversationHistory && Array.isArray(conversationHistory)) {
-        messages.push(...conversationHistory);
-      }
-
-      // Ajouter le message actuel
-      messages.push({
-        role: 'user',
-        content: message
-      });
-
-      // Appel à l'API OpenAI
-      const response = await axios.post(
-        OPENAI_API_URL,
-        {
-          model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
-          messages: messages,
-          temperature: parseFloat(process.env.OPENAI_TEMPERATURE || '0.7'),
-          max_tokens: parseInt(process.env.OPENAI_MAX_TOKENS || '500')
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${OPENAI_API_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 30000 // 30 secondes de timeout
-        }
+      // Appel à OpenAI
+      const openAIResponse = await callOpenAI(
+        messages,
+        DEFAULT_MODEL,
+        DEFAULT_TEMPERATURE,
+        DEFAULT_MAX_TOKENS
       );
 
       // Extraire la réponse
-      const aiResponse = response.data.choices[0]?.message?.content;
+      const aiResponse = openAIResponse.choices?.[0]?.message?.content;
 
       if (!aiResponse) {
         return res.status(500).json({
@@ -103,39 +131,27 @@ export default async function handler(req, res) {
         });
       }
 
-      // Retourner la réponse formatée pour Qualtrics
-      return res.json({
+      // Retourner la réponse
+      return res.status(200).json({
         success: true,
         response: aiResponse,
-        usage: response.data.usage,
-        model: response.data.model
+        usage: openAIResponse.usage,
+        model: openAIResponse.model
       });
 
     } catch (error) {
-      console.error('Erreur lors de l\'appel à ChatGPT:', error);
+      console.error('Erreur:', error);
 
-      // Gestion des erreurs spécifiques
-      if (error.response) {
-        // Erreur de l'API OpenAI
-        const statusCode = error.response.status;
-        const errorMessage = error.response.data?.error?.message || 'Erreur de l\'API OpenAI';
-
-        return res.status(statusCode).json({
-          error: errorMessage,
-          details: error.response.data?.error
-        });
-      } else if (error.request) {
-        // Pas de réponse du serveur
-        return res.status(503).json({
-          error: 'Service temporairement indisponible. Impossible de contacter l\'API ChatGPT'
-        });
-      } else {
-        // Erreur de configuration
-        return res.status(500).json({
-          error: 'Erreur interne du serveur',
-          message: error.message
+      if (error.status) {
+        return res.status(error.status).json({
+          error: error.message
         });
       }
+
+      return res.status(500).json({
+        error: 'Erreur interne du serveur',
+        message: error.message || 'Erreur inconnue'
+      });
     }
   }
 
@@ -145,4 +161,3 @@ export default async function handler(req, res) {
     error: 'Méthode non autorisée'
   });
 }
-
